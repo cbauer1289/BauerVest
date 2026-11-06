@@ -388,6 +388,17 @@ def backtest(px, lump, you, emp, reinvest):
     return df, irr_annual(flows)
 
 
+def monte_carlo(n, lump, you, emp, annual_r, vol, sims, seed=42):
+    """Simulated balance paths: monthly returns are lognormal, so the median path grows at annual_r."""
+    rng = np.random.default_rng(seed)
+    growth = np.exp(rng.normal(np.log1p(annual_r) / 12, vol / np.sqrt(12), size=(sims, n)))
+    bal = np.empty((sims, n + 1))
+    bal[:, 0] = lump
+    for k in range(n):
+        bal[:, k + 1] = (bal[:, k] + you[k] + emp[k]) * growth[:, k]
+    return bal
+
+
 def risk(px, reinvest):
     c = px["close"]
     d = px["div"] if reinvest else 0.0
@@ -520,8 +531,9 @@ for p in problems:
 if common > req_start + pd.Timedelta(days=15):
     st.info(f"Look-back starts {common:%b %Y} — the first month every selected ticker has price history.")
 
-tab_back, tab_ahead, tab_goal, tab_health, tab_risk, tab_method = st.tabs(
-    ["↺  Look Back", "↗  Look Ahead", "◎  Goal Planner", "✚  Health Check", "≋  Risk Lens", "ⓘ  Methodology"])
+tab_back, tab_ahead, tab_goal, tab_mc, tab_health, tab_risk, tab_method = st.tabs(
+    ["↺  Look Back", "↗  Look Ahead", "◎  Goal Planner", "⚄  Monte Carlo", "✚  Health Check", "≋  Risk Lens",
+     "ⓘ  Methodology"])
 
 # ───────────────────────────────────────────── look back
 with tab_back:
@@ -654,6 +666,78 @@ with tab_goal:
         fig.update_xaxes(title="Age", title_font=dict(color=MUTED))
         show_chart(fig)
 
+# ───────────────────────────────────────────── monte carlo
+with tab_mc:
+    bench_vol = rk[BENCH]["vol"] if BENCH in rk else 0.16
+    m1, m2 = st.columns([2, 1])
+    vol = m1.slider(f"Annual volatility (%) · {BENCH_NAME} historical: {pct(bench_vol)}", 2.0, 60.0,
+                    float(np.clip(round(bench_vol * 100), 2, 60)), 0.5) / 100
+    sims = m2.selectbox("Simulated markets", [500, 1_000, 2_000, 5_000], index=2)
+
+    n_sim = max(n_now, (goal_age - age) * 12 if goal_age > age else 0)
+    you_s, emp_s = contributions(n_sim, monthly, salary, raise_pct, use_match, match_pct, match_cap)
+    paths = monte_carlo(n_sim, lump, you_s, emp_s, exp_r, vol, sims)
+    if real:
+        paths = paths / (1 + infl) ** (np.arange(n_sim + 1) / 12)
+    at_retire = paths[:, n_now]
+    p10, p50, p90 = np.percentile(at_retire, [10, 50, 90])
+    goal_ok = goal_age > age
+    hit = float(np.mean(paths[:, (goal_age - age) * 12] >= goal)) if goal_ok else np.nan
+    p_loss = float(np.mean(at_retire < lump + you_s[:n_now].sum()))
+
+    st.markdown(f'<div class="kpi-row">' + "".join([
+        kpi("Chance of hitting goal", pct(hit, 0) if goal_ok else "—",
+            f"{big(goal)} by {goal_age} · current plan" if goal_ok else "set a goal age", GOLD),
+        kpi("Median at retirement", big(p50), f"age {retire} · {dollars}", VIOLET),
+        kpi("Bad-luck market", big(p10), "10th percentile outcome", ROSE),
+        kpi("Good-luck market", big(p90), "90th percentile outcome", TEAL),
+    ]) + "</div>", unsafe_allow_html=True)
+    st.markdown(f'<div class="insight">Across <b>{sims:,}</b> simulated markets averaging <b>{pct(exp_r)}</b> a year '
+                f'with <b>{pct(vol)}</b> volatility, your plan ends between <b>{money(p10)}</b> and '
+                f'<b>{money(p90)}</b> in 8 out of 10 outcomes'
+                f'{f", and hits your {big(goal)} goal <b>{pct(hit, 0)}</b> of the time" if goal_ok else ""}. '
+                f'The same average return can produce very different results depending on the order of good '
+                f'and bad years.</div>', unsafe_allow_html=True)
+
+    ages_sim = age + np.arange(n_now + 1) / 12
+    q = np.percentile(paths[:, :n_now + 1], [10, 25, 50, 75, 90], axis=0)
+    fig = go.Figure()
+    for hi, lo, alpha, name in [(4, 0, .10, "10th–90th percentile"), (3, 1, .22, "25th–75th percentile")]:
+        fig.add_trace(go.Scatter(x=ages_sim, y=q[hi], line=dict(width=0), showlegend=False, hoverinfo="skip"))
+        fig.add_trace(go.Scatter(x=ages_sim, y=q[lo], line=dict(width=0), fill="tonexty",
+                                 fillcolor=f"rgba(160,143,255,{alpha})", name=name, hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=ages_sim, y=q[2], name="Median outcome", line=dict(color=GOLD, width=3)))
+    fig.add_trace(go.Scatter(x=ages_sim, y=path_now, name="Look Ahead projection",
+                             line=dict(color=SILVER, width=1.5, dash="dot")))
+    if goal_ok and goal_age <= retire:
+        fig.add_trace(go.Scatter(x=[goal_age], y=[goal], mode="markers+text", name="Your goal",
+                                 marker=dict(color=ROSE, size=12, symbol="diamond"),
+                                 text=[f"Goal {big(goal)}"], textposition="top center",
+                                 textfont=dict(color=ROSE)))
+    style(fig, 460)
+    fig.update_xaxes(title="Age", title_font=dict(color=MUTED))
+    show_chart(fig)
+
+    cap = np.percentile(at_retire, 99)
+    hist = go.Figure(go.Histogram(x=np.clip(at_retire, None, cap), nbinsx=60, marker_color=VIOLET,
+                                  marker_line=dict(color=BG, width=1), name="Outcomes",
+                                  hovertemplate="%{x:$,.0f}: %{y} markets<extra></extra>"))
+    for val, label, c, side in [(p10, "10th", ROSE, "top left"), (p50, "Median", GOLD, "top right"),
+                                (p90, "90th", TEAL, "top right")]:
+        hist.add_vline(x=val, line=dict(color=c, width=2, dash="dash"),
+                       annotation_text=f"{label} {big(val)}", annotation_font_color=c,
+                       annotation_position=side)
+    style(hist, 340, money_axis=False)
+    hist.update_xaxes(tickprefix="$", tickformat="~s", title=f"Balance at {retire} ({dollars})",
+                      title_font=dict(color=MUTED))
+    hist.update_yaxes(title="Simulated markets", title_font=dict(color=MUTED))
+    hist.update_layout(showlegend=False, hovermode="closest", bargap=.05)
+    st.markdown('<div class="panel" style="padding:12px 18px;margin-bottom:0"><h4>Distribution at retirement</h4>'
+                f'<div class="note">Each bar counts how many simulated markets ended in that range. '
+                f'In {pct(p_loss, 1)} of markets you finish with less than you contributed.</div></div>',
+                unsafe_allow_html=True)
+    show_chart(hist)
+
 # ───────────────────────────────────────────── health check
 with tab_health:
     st.markdown('<div class="note" style="margin-bottom:14px">Report cards built from each company\'s latest '
@@ -746,6 +830,9 @@ index: (Price<sub>t</sub> + Dividend<sub>t</sub>) ÷ Price<sub>t−1</sub>.<br><
 <b>Look Ahead.</b> Balance<sub>m+1</sub> = (Balance<sub>m</sub> + contributions) × (1 + r)<sup>1/12</sup>.
 In today's dollars, values are divided by (1 + inflation)<sup>years</sup>. The later starter follows the same plan, shifted.<br><br>
 <b>Goal Planner.</b> Solves for the monthly contribution whose future value equals the goal (bisection), including match and raises.<br><br>
+<b>Monte Carlo.</b> Simulates thousands of possible markets. Each month's return is drawn at random:
+growth = e<sup>Z</sup>, with Z ~ Normal(ln(1 + r) ÷ 12, volatility ÷ √12), so the median market grows at the expected return
+while individual paths swing above and below it. Percentiles across all paths give the outcome ranges and the probability of reaching the goal.<br><br>
 <b>Health Check.</b> Latest annual 10-K values from SEC EDGAR XBRL: current ratio = current assets ÷ current liabilities;
 net margin = net income ÷ revenue; ROE = net income ÷ shareholders' equity; debt-to-equity = total debt ÷ equity;
 revenue growth = 3-year CAGR. Letter grades are averaged on a 4.0 scale.<br><br>

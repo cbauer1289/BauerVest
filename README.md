@@ -10,6 +10,7 @@ BauerVest is an investment analytics app that answers three questions an investo
 - **Look Back** — backtests monthly investing in up to 3 stocks against the S&P 500, with a lump sum, dividend reinvestment, yearly raises, and an employer 401(k) match. Reports the money-weighted return (IRR) and each stock's CAGR.
 - **Look Ahead** — projects "start now vs. start later" to retirement and puts a dollar value on every year of waiting, in today's or future dollars.
 - **Goal Planner** — solves for the monthly contribution needed to reach a target by a chosen age.
+- **Monte Carlo** — simulates thousands of possible markets to show the range of outcomes and the probability of reaching your goal.
 - **Health Check** — grades each company A–F on liquidity, profitability, return on equity, leverage, and revenue growth using its latest 10-K data from SEC EDGAR.
 - **Risk Lens** — volatility, max drawdown, best/worst years, and return-per-unit-of-risk.
 
